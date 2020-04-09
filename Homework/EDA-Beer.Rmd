@@ -1,0 +1,153 @@
+---
+title: "EDA of Beer Production"
+author: "Juan Solorio"
+date: "4/2/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r, load-libraries}
+library(tidyverse)
+require(forecast) #seasonplot
+require(fda) #create bases for functional data
+require(rainbow) #for coloring curves
+require(qcc) #ewma control chart
+require(car) #better QQ plots
+data <- read.csv("../../Data/Beer.csv")
+```
+```{r, times-series}
+data$DATE <- as.Date(data$DATE, format = "%m/%d/%Y")
+beer.ts <- ts(data = data$BeerProduction, frequency = 12,start = c(1992,1),end = c(2015,12))
+time.ts <- seq(as.Date("1992-01-01"), as.Date("2015-12-01"), by='1 month' )
+
+# data frame with basic structures
+ts.df = data.frame(Time = time.ts, Beer.Production = beer.ts)
+ts.df$Year = as.integer(strftime(time.ts,'%Y'))
+ts.df$Month = as.integer(strftime(time.ts,'%m'))
+```
+
+The data loaded is a data frame and needs to be converted into a 'time-series' object for us to perform some analysis.
+Hense the `r ts` function takes in the `r BeerProduction` variable and makes this transformation.
+
+```{r, plot1}
+# autoplot takes in the time series object and plots it
+autoplot(beer.ts) +
+  ggtitle("Beer Production Time Series") +
+  ylab("Beer Production") + xlab("Date")
+```
+
+From the chart we can see there is both a trend and seasonality.
+
+```{r}
+seasonplot(beer.ts)
+```
+
+```{r}
+#look at annual data to better see smooth trend
+beer_yr = aggregate(data = ts.df, Beer.Production ~ Year, sum  )
+beer_mn = aggregate(data = ts.df, Beer.Production ~ Month, mean  )
+ts.plot(beer_mn$Beer.Production)
+ts.plot(beer_yr$Beer.Production)
+vb_yr = sort(unique(beer_yr$Year))
+
+```
+
+
+```{r}
+#check if monthly proportions roughly look constant year-to-year
+colnames(beer_yr)[2] = "beer_annual"
+ts.df = merge(ts.df, beer_yr, by = "Year")
+ts.df$y_prop = ts.df$Beer.Production/ts.df$beer_annual
+
+ts.plot(ts.df$y_prop)
+
+```
+
+Monthly propotion of the production of beer seem to be faily constant year-to-year according to the figure.
+
+```{r}
+#Look at distribution in monthly proportions (assuming stationary)
+boxplot(data = ts.df, y_prop ~ Month) ##check similarity in proportions
+
+```
+
+```{r}
+##### STL Decompostion
+#given seasonal effect depends on level do log transform
+beer_log = log(beer.ts)
+
+#decompose and plot
+fit_stl_beer = stl(beer_log, s.window = 12)
+plot(fit_stl_beer)
+
+#extract components
+S_b = fit_stl_beer$time.series[,1]
+L_b = fit_stl_beer$time.series[,2]
+E_b = fit_stl_beer$time.series[,3]
+
+ts.plot(exp(S_b), main = 'Multiplicative Seasonality Component')
+
+```
+
+```{r}
+##### Functional Data View of Seasonality
+#convert univariate series to 12 curves for each year
+Mb = matrix(NA, nrow = 12, ncol =  length(vb_yr) )
+ts.df$S = exp(S_b)
+
+for( j in 1:ncol(Mb)  ){
+  #subset
+  d_j = subset(ts.df, Year == vb_yr[j])
+  S_j = d_j$S
+  S_j = S_j/mean(S_j) #ensure normalized
+  
+  #add
+  Mb[,j] = S_j
+}
+
+colnames(Mb) = vb_yr
+
+#Add Fourier Bases and plot
+vb_f <- create.fourier.basis(  rangeval = c(0,nrow(Mb)),  nbasis = 7)
+Sb_basis <- smooth.basis( y = Mb, fdParobj = vb_f)
+plot(Sb_basis$fd)
+
+
+#Add mean
+Wb.mean <- mean.fd(Sb_basis$fd)
+lines(Wb.mean, lty = 2, col='black', lwd=3)
+
+```
+
+```{r}
+##### Look at Multiplicative Residuals
+#plot centered about zero to eyeball randomness
+ts.plot(E_b)
+tbSeq = 1:length(E_b)
+abline(h=0, col='black')
+
+#autocorrelation
+acf(E_b)
+
+#control chart at slow smoothing
+ewma(E_b, lambda = .2)
+
+```
+
+```{r}
+#fit ar(1) model and extract residuals
+fitb_ar1 = arima(E_b, order = c(1,0,0))
+rb = fitb_ar1$residuals
+rb = rb/sd(rb)
+
+#distribution
+hist(rb, main='Frequency of Normalized Multiplicative Residuals')
+
+#compare fit against standard Gaussian
+qqPlot(rb, main='Normalized Multiplicative Residuals vs N(0,1)')
+
+##notice that variance does not constant. 
+
+```
